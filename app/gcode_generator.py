@@ -1,154 +1,150 @@
 # app/gcode_generator.py
 
-# Import Image and ImageDraw from Pillow for image handling and drawing.
 from PIL import Image, ImageDraw
-# Import regex module for parsing G-code commands in visualization.
 import re
+import math
+from scipy.spatial import KDTree # New powerful import!
+from . import config
 
-
-def generate_raster_gcode(image, resolution, pen_nib_mm):
-    """Generates G-code with scan lines spaced by the pen's nib size.
-
-    Parameters:
-    - image: a PIL Image (mode 'L' or similar) where 0 represents black/ink.
-    - resolution: pixels per millimeter (px/mm) used to convert between image
-      pixel coordinates and real-world millimeters for G-code.
-    - pen_nib_mm: pen nib width in millimeters; used to space raster scanlines.
-
-    Returns a list of G-code command strings.
+def generate_kdtree_gcode(image):
     """
-    # Container for the generated lines of G-code.
-    gcode = []
-
-    # Get width and height (in pixels) from the PIL Image object.
-    width, height = image.size
-
-    # Load the pixel access object to read pixel values quickly.
+    Generates a highly optimized G-code path using a k-d tree and path sorting.
+    """
+    
+    print("Finding all black pixels...")
     pixels = image.load()
+    width, height = image.size
     
-    # Add a comment to the top of the G-code with the pen nib info.
-    gcode.append(f"; Generated with pen nib size: {pen_nib_mm}mm")
+    point_list = []
+    # Create a map to quickly find the index of a point
+    point_to_index_map = {}
+    for y in range(height):
+        for x in range(width):
+            if pixels[x, y] == 0:
+                index = len(point_list)
+                point_list.append((x, y))
+                point_to_index_map[(x, y)] = index
 
-    # Ensure the pen is up to start: 'M5' is used here as the pen-up command.
+    if not point_list:
+        print("No black pixels found.")
+        return ["M5", "G1 X0 Y0"]
+
+    print(f"Found {len(point_list)} points. Building k-d tree for optimization...")
+    
+    kdtree = KDTree(point_list)
+    visited = [False] * len(point_list)
+    points_remaining = len(point_list)
+
+    scale_x = config.PLOTTER_WIDTH_MM / width
+    scale_y = config.PLOTTER_HEIGHT_MM / height
+    search_radius_px = config.SEARCH_RADIUS_MM / scale_x
+
+    gcode = []
+    gcode.append("; Generated with Sorted k-d tree nearest neighbor")
     gcode.append("M5 ; Pen Up")
+    gcode.append("G1 X0 Y0 F5000")
 
-    # Move to origin (0,0) with a feedrate (F2000) to establish starting position.
-    gcode.append("G1 X0 Y0 F2000")
+    while points_remaining > 0:
+        # --- PATH SORTING LOGIC ---
+        # Find the top-most, left-most unvisited point to start the next island.
+        next_start_index = -1
+        for i, point in enumerate(point_list):
+            if not visited[i]:
+                next_start_index = i
+                break
+        
+        if next_start_index == -1: break # Should not happen if points_remaining > 0
 
-    # Track whether the pen is currently down (drawing) or up (traveling).
-    pen_is_down = False
-    
-    # Compute how many pixels correspond to the pen nib width. This controls
-    # vertical step size between successive raster rows so lines don't overlap.
-    y_step = int(pen_nib_mm * resolution)
-    # Guard against a zero step if pen_nib_mm is very small or resolution low.
-    if y_step == 0: y_step = 1
-    
-    # Print a helpful message for the user/developer describing the step.
-    print(f"Raster scan will advance {y_step} pixels per line to match pen width.")
+        current_index = next_start_index
+        start_point = point_list[current_index]
+        
+        gcode.append(f"G1 X{start_point[0] * scale_x:.2f} Y{start_point[1] * scale_y:.2f} F5000")
+        gcode.append("M3 ; Pen Down")
+        
+        path = [start_point]
+        visited[current_index] = True
+        points_remaining -= 1
 
-    # Iterate over rows in the image stepping by y_step pixels each loop.
-    for y in range(0, height, y_step):
-        # For efficiency in travel between rows, alternate the horizontal scan
-        # direction every row (a serpentine/zig-zag pattern). On even rows
-        # scan left-to-right; on odd rows scan right-to-left.
-        x_range = range(width) if y % 2 == 0 else range(width - 1, -1, -1)
+        while True:
+            # Query the tree for the 10 nearest neighbors
+            distances, indices = kdtree.query(point_list[current_index], k=10, distance_upper_bound=search_radius_px)
 
-        # Iterate over every x in the chosen direction.
-        for x in x_range:
-            # Determine whether the current pixel is black (ink) or not.
-            # This assumes an 8-bit grayscale image where 0 == black.
-            is_black = (pixels[x, y] == 0)
+            found_neighbor = False
+            for i, idx in enumerate(indices):
+                if idx >= len(point_list): continue
+                if not visited[idx]:
+                    current_index = idx
+                    path.append(point_list[current_index])
+                    visited[current_index] = True
+                    points_remaining -= 1
+                    found_neighbor = True
+                    break
             
-            # If we encounter a black pixel and the pen is currently up,
-            # move to that pixel position and lower the pen to start drawing.
-            if is_black and not pen_is_down:
-                # Convert pixel coordinates to millimeters using resolution
-                # and append a G1 move to that position (fast positioning).
-                gcode.append(f"G1 X{x/resolution:.2f} Y{y/resolution:.2f}")
-                # Lower the pen: 'M3' here is used as the pen-down command.
-                gcode.append("M3 ; Pen Down")
-                pen_is_down = True
-            
-            # If pixel is not black but pen is down, we reached the end of a
-            # drawn segment and need to raise the pen after moving to the last
-            # drawn pixel so we don't lift mid-segment.
-            elif not is_black and pen_is_down:
-                # Compute the last drawn x coordinate depending on scan direction.
-                last_x = x - 1 if y % 2 == 0 else x + 1
-                # Move to the last drawn pixel (converted to mm) before lifting.
-                gcode.append(f"G1 X{last_x/resolution:.2f} Y{y/resolution:.2f}")
-                # Raise the pen.
-                gcode.append("M5 ; Pen Up")
-                pen_is_down = False
-                
-        # After finishing the row, if the pen is still down, ensure we lift it
-        # at the end of the row and move explicitly to the row's end point.
-        if pen_is_down:
-            # Choose the end-of-row x coordinate based on scan direction.
-            end_of_row_x = width - 1 if y % 2 == 0 else 0
-            # Move to the end of row in mm and then lift the pen.
-            gcode.append(f"G1 X{end_of_row_x/resolution:.2f} Y{y/resolution:.2f}")
-            gcode.append("M5 ; Pen Up")
-            pen_is_down = False
+            if not found_neighbor:
+                break
 
-    # After all rows are processed, return to home (0,0).
+        # --- PATH CHAINING LOGIC ---
+        # Generate G-code for the full traced path, not just the end point.
+        for point in path:
+             gcode.append(f"G1 X{point[0] * scale_x:.2f} Y{point[1] * scale_y:.2f} F2000") # Drawing speed
+        
+        gcode.append("M5 ; Pen Up")
+
+        if points_remaining % 1000 == 0 and points_remaining > 0:
+            print(f"Points remaining: {points_remaining}")
+            
     gcode.append("G1 X0 Y0 ; Return to home")
-    
-    # Log completion and return the list of G-code commands.
     print("G-code generation complete.")
     return gcode
 
-
-def visualize_gcode_path(base_image, gcode, resolution):
-    """Draws the G-code path onto the base image for debugging.
-
-    This function parses simple G1 X.. Y.. moves and M3/M5 pen commands to
-    render the motion path. Pen-down movement is drawn in red; pen-up in blue.
-    """
-    # Inform the user that visualization is starting.
+# (The visualize_gcode_path and analyze_gcode functions remain the same)
+def visualize_gcode_path(base_image, gcode):
+    """Draws the G-code path onto the base image for debugging."""
     print("Creating toolpath visualization...")
+    # Calculate scaling from mm back to pixels for drawing
+    scale_x = base_image.width / config.PLOTTER_WIDTH_MM
+    scale_y = base_image.height / config.PLOTTER_HEIGHT_MM
 
-    # Convert the base image to RGB so colored lines can be drawn.
     canvas = base_image.convert('RGB')
-
-    # Create a drawing context for the image.
     draw = ImageDraw.Draw(canvas)
-
-    # Track the current position in pixel coordinates; start at origin (0,0).
     current_pos_px = (0, 0)
-
-    # Track pen state: True when drawing, False when lifted.
     pen_is_down = False
-
-    # Precompile a regex to find G1 commands with X and Y numeric values.
     g1_pattern = re.compile(r'G1\s+X([\d\.]+)\s+Y([\d\.]+)')
 
-    # Iterate over each G-code command string produced earlier.
     for command in gcode:
-        # Toggle pen state based on M3 (down) and M5 (up) commands.
         if command.startswith("M3"): pen_is_down = True
         elif command.startswith("M5"): pen_is_down = False
-
-        # If there's a G1 X.. Y.. command, extract the X and Y coordinates.
         match = g1_pattern.search(command)
         if match:
-            # Parse the millimeter coordinates from the command.
             x_mm = float(match.group(1))
             y_mm = float(match.group(2))
-
-            # Convert millimeters back to pixels for drawing on the canvas.
-            target_pos_px = (int(x_mm * resolution), int(y_mm * resolution))
-
-            # Use red for pen-down segments and blue for pen-up travel moves.
+            target_pos_px = (int(x_mm * scale_x), int(y_mm * scale_y))
             line_color = "red" if pen_is_down else "blue"
-
-            # Draw a line from the current position to the target position.
             draw.line([current_pos_px, target_pos_px], fill=line_color, width=1)
-
-            # Update current position for the next segment.
             current_pos_px = target_pos_px
-
-    # Save the visualization to a PNG file for inspection.
+    
     canvas.save("debug_02_toolpath_visualization.png")
-    print("Visualization saved to 'debug_02_toolpath_visualization.png'")
+    print("Visualization saved.")
+
+def analyze_gcode(gcode):
+    """Calculates the total drawing distance vs. travel distance."""
+    # (This function is unchanged)
+    draw_dist, travel_dist, current_pos, pen_is_down = 0.0, 0.0, (0.0, 0.0), False
+    g1_pattern = re.compile(r'G1\s+X([\d\.]+)\s+Y([\d\.]+)')
+    for command in gcode:
+        if "M3" in command: pen_is_down = True
+        elif "M5" in command: pen_is_down = False
+        match = g1_pattern.search(command)
+        if match:
+            target_x, target_y = float(match.group(1)), float(match.group(2))
+            dist = math.sqrt((target_x - current_pos[0])**2 + (target_y - current_pos[1])**2)
+            if pen_is_down: draw_dist += dist
+            else: travel_dist += dist
+            current_pos = (target_x, target_y)
+    total_dist = draw_dist + travel_dist
+    efficiency = (draw_dist / total_dist) * 100 if total_dist > 0 else 0
+    print("\n--- G-code Path Analysis ---")
+    print(f"Total Drawing Distance: {draw_dist:.2f} mm")
+    print(f"Total Travel Distance:  {travel_dist:.2f} mm")
+    print(f"Path Efficiency:        {efficiency:.2f}%")
+    print("----------------------------")
