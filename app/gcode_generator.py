@@ -6,24 +6,68 @@ import math
 from scipy.spatial import KDTree # New powerful import!
 from . import config
 
+# Add this new function at the top of app/gcode_generator.py
+
+def ramer_douglas_peucker(point_list, epsilon):
+    """
+    Simplifies a path using the Ramer-Douglas-Peucker algorithm.
+    """
+    if len(point_list) < 3:
+        return point_list
+
+    # Find the point with the maximum distance
+    dmax = 0
+    index = 0
+    start, end = point_list[0], point_list[-1]
+    
+    for i in range(1, len(point_list) - 1):
+        # Using a simplified perpendicular distance calculation
+        d = perpendicular_distance(point_list[i], start, end)
+        if d > dmax:
+            index = i
+            dmax = d
+
+    # If max distance is greater than epsilon, recursively simplify
+    if dmax > epsilon:
+        # Recursive call
+        rec_results1 = ramer_douglas_peucker(point_list[:index + 1], epsilon)
+        rec_results2 = ramer_douglas_peucker(point_list[index:], epsilon)
+
+        # Build the result list
+        return rec_results1[:-1] + rec_results2
+    else:
+        return [start, end]
+
+def perpendicular_distance(point, line_start, line_end):
+    """Calculates the perpendicular distance of a point from a line segment."""
+    x1, y1 = line_start
+    x2, y2 = line_end
+    x0, y0 = point
+    
+    # Using the formula for the area of a triangle
+    numerator = abs((y2 - y1) * x0 - (x2 - x1) * y0 + x2 * y1 - y2 * x1)
+    denominator = math.sqrt((y2 - y1)**2 + (x2 - x1)**2)
+    
+    if denominator == 0:
+        return math.sqrt((x0 - x1)**2 + (y0 - y1)**2)
+        
+    return numerator / denominator
+
+
+# In app/gcode_generator.py, replace the existing generate_kdtree_gcode function
+
 def generate_kdtree_gcode(image):
-    """
-    Generates a highly optimized G-code path using a k-d tree and path sorting.
-    """
+    """Generates a highly optimized and simplified G-code path."""
     
     print("Finding all black pixels...")
     pixels = image.load()
     width, height = image.size
     
     point_list = []
-    # Create a map to quickly find the index of a point
-    point_to_index_map = {}
     for y in range(height):
         for x in range(width):
             if pixels[x, y] == 0:
-                index = len(point_list)
                 point_list.append((x, y))
-                point_to_index_map[(x, y)] = index
 
     if not point_list:
         print("No black pixels found.")
@@ -40,33 +84,28 @@ def generate_kdtree_gcode(image):
     search_radius_px = config.SEARCH_RADIUS_MM / scale_x
 
     gcode = []
-    gcode.append("; Generated with Sorted k-d tree nearest neighbor")
+    gcode.append("; Generated with RDP Simplified k-d tree algorithm")
     gcode.append("M5 ; Pen Up")
     gcode.append("G1 X0 Y0 F5000")
 
     while points_remaining > 0:
-        # --- PATH SORTING LOGIC ---
-        # Find the top-most, left-most unvisited point to start the next island.
         next_start_index = -1
         for i, point in enumerate(point_list):
             if not visited[i]:
                 next_start_index = i
                 break
         
-        if next_start_index == -1: break # Should not happen if points_remaining > 0
+        if next_start_index == -1: break
 
         current_index = next_start_index
-        start_point = point_list[current_index]
         
-        gcode.append(f"G1 X{start_point[0] * scale_x:.2f} Y{start_point[1] * scale_y:.2f} F5000")
-        gcode.append("M3 ; Pen Down")
-        
-        path = [start_point]
-        visited[current_index] = True
-        points_remaining -= 1
-
+        # This part remains the same: trace the full path of an island
+        raw_path = []
         while True:
-            # Query the tree for the 10 nearest neighbors
+            raw_path.append(point_list[current_index])
+            visited[current_index] = True
+            points_remaining -= 1
+
             distances, indices = kdtree.query(point_list[current_index], k=10, distance_upper_bound=search_radius_px)
 
             found_neighbor = False
@@ -74,21 +113,27 @@ def generate_kdtree_gcode(image):
                 if idx >= len(point_list): continue
                 if not visited[idx]:
                     current_index = idx
-                    path.append(point_list[current_index])
-                    visited[current_index] = True
-                    points_remaining -= 1
                     found_neighbor = True
                     break
             
             if not found_neighbor:
                 break
-
-        # --- PATH CHAINING LOGIC ---
-        # Generate G-code for the full traced path, not just the end point.
-        for point in path:
-             gcode.append(f"G1 X{point[0] * scale_x:.2f} Y{point[1] * scale_y:.2f} F2000") # Drawing speed
         
-        gcode.append("M5 ; Pen Up")
+        # --- NEW RDP SIMPLIFICATION STEP ---
+        # Simplify the raw pixel path into a few straight lines
+        simplified_path = ramer_douglas_peucker(raw_path, config.RDP_EPSILON)
+
+        # --- G-CODE GENERATION ---
+        # Generate G-code from the NEW simplified path
+        if simplified_path:
+            start_point = simplified_path[0]
+            gcode.append(f"G1 X{start_point[0] * scale_x:.2f} Y{start_point[1] * scale_y:.2f} F5000") # Fast travel move
+            gcode.append("M3 ; Pen Down")
+            
+            for point in simplified_path:
+                 gcode.append(f"G1 X{point[0] * scale_x:.2f} Y{point[1] * scale_y:.2f} F2000") # Drawing speed
+            
+            gcode.append("M5 ; Pen Up")
 
         if points_remaining % 1000 == 0 and points_remaining > 0:
             print(f"Points remaining: {points_remaining}")

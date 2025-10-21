@@ -4,6 +4,8 @@ import math
 # --- USER-DEFINED TARGETS ---
 TARGET_DPI = 600.0  # The ideal resolution we want to process images at.
 
+RDP_EPSILON = 1.5  # Tolerance for Ramer-Douglas-Peucker line simplification
+
 # --- PHYSICAL MACHINE PARAMETERS ---
 PLOTTER_WIDTH_MM = 115.0
 PLOTTER_HEIGHT_MM = 115.0
