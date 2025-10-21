@@ -4,7 +4,19 @@ import math
 # --- USER-DEFINED TARGETS ---
 TARGET_DPI = 600.0  # The ideal resolution we want to process images at.
 
-RDP_EPSILON = 1.5  # Tolerance for Ramer-Douglas-Peucker line simplification
+# --- ALGORITHM TUNING ---
+
+# NEW: Parameters for cleaning the image before pathfinding
+MORPH_CLOSING_ITERATIONS = 2 # How aggressively to merge nearby pixels. Try values between 1-5.
+MIN_OBJECT_SIZE_PIXELS = 200  # Minimum size of objects to keep, in pixels.
+
+# RDP Epsilon: A slightly larger value helps identify longer segments to test for curves.
+RDP_EPSILON = 2.0 
+
+# NEW: The tolerance for arc fitting, in pixels. How closely the points must follow the fitted circle.
+ARC_FITTING_TOLERANCE = 1.0
+
+SEARCH_RADIUS_MM = 5.0
 
 # --- PHYSICAL MACHINE PARAMETERS ---
 PLOTTER_WIDTH_MM = 115.0

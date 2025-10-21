@@ -1,12 +1,13 @@
 # app/image_processing.py
 
 from PIL import Image
-from . import config # Import the config file
+import numpy as np
+from skimage.morphology import closing, remove_small_objects, footprint_rectangle
+from . import config
 
 def process_image(filepath):
     """
-    Loads an image, resizes it to fit the canvas at the optimal processing
-    resolution, and converts to pure black and white.
+    Loads, stretches to fill the canvas, cleans, and converts an image.
     """
     try:
         img = Image.open(filepath).convert('L')
@@ -18,17 +19,29 @@ def process_image(filepath):
     canvas_width_px = int(config.PLOTTER_WIDTH_MM * config.PROCESSING_STEPS_PER_MM)
     canvas_height_px = int(config.PLOTTER_HEIGHT_MM * config.PROCESSING_STEPS_PER_MM)
     
-    img.thumbnail((canvas_width_px, canvas_height_px))
+    # --- THIS IS THE CORRECTED LOGIC ---
+    # 1. Stretch the image to the exact canvas dimensions.
+    img = img.resize((canvas_width_px, canvas_height_px))
+    print(f"Image stretched to fit {img.width}x{img.height} pixel canvas (Target: {config.PROCESSING_DPI:.0f} DPI)")
 
-    print(f"Processing image at {img.width}x{img.height} pixels (Target: {config.PROCESSING_DPI:.0f} DPI)")
-
-    # Create a new white background and paste the image in the center
-    bg = Image.new('L', (canvas_width_px, canvas_height_px), 255)
-    paste_x = (canvas_width_px - img.width) // 2
-    paste_y = (canvas_height_px - img.height) // 2
-    bg.paste(img, (paste_x, paste_y))
-    
+    # 2. Convert to a binary image before cleaning.
     threshold = 128
-    processed_img = bg.point(lambda p: 255 if p > threshold else 0, '1')
+    binary_img = img.point(lambda p: 255 if p > threshold else 0, '1')
+
+    # 3. Apply cleaning operations.
+    print("Cleaning image with morphological operations...")
+    image_array = ~np.array(binary_img, dtype=bool)
+    footprint = footprint_rectangle((3,3))
     
+    closed_array = closing(image_array, footprint)
+    for _ in range(config.MORPH_CLOSING_ITERATIONS - 1):
+        closed_array = closing(closed_array, footprint)
+
+    cleaned_array = remove_small_objects(closed_array, min_size=config.MIN_OBJECT_SIZE_PIXELS)
+
+    # 4. Convert the cleaned array back to a final Pillow image.
+    final_array = (~cleaned_array).astype(np.uint8) * 255
+    processed_img = Image.fromarray(final_array, 'L').convert('1')
+    
+    print("Image cleaning complete.")
     return processed_img
