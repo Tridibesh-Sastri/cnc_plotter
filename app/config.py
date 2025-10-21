@@ -4,6 +4,10 @@ import math
 # --- USER-DEFINED TARGETS ---
 TARGET_DPI = 600.0  # The ideal resolution we want to process images at.
 
+# --- STRATEGY SELECTOR ---
+# Choose the processing pipeline: 'photo' or 'text'
+PROCESSING_STRATEGY = 'text'
+
 # --- ALGORITHM TUNING ---
 
 # NEW: Parameters for cleaning the image before pathfinding
